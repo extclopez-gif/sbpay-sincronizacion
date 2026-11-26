@@ -1,0 +1,54 @@
+name: Sincronizar CMF
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: cmf-sync
+  cancel-in-progress: false
+
+jobs:
+  synchronize:
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    steps:
+      - name: Ejecutar una tanda confirmada en el backend
+        env:
+          CMF_SITE_URL: ${{ secrets.CMF_SITE_URL }}
+          CMF_CRON_SECRET: ${{ secrets.CMF_CRON_SECRET }}
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json, os, sys, urllib.request, urllib.error
+          from urllib.parse import urlsplit
+          origin = os.environ.get("CMF_SITE_URL", "").strip().rstrip("/")
+          token = os.environ.get("CMF_CRON_SECRET", "").strip()
+          parsed = urlsplit(origin)
+          if (parsed.scheme != "https" or not parsed.netloc or parsed.username
+              or parsed.password or parsed.query or parsed.fragment
+              or parsed.path not in ("", "/") or not token):
+              sys.exit("Configura CMF_SITE_URL como origen HTTPS y CMF_CRON_SECRET en los secretos de Actions.")
+          class NoRedirect(urllib.request.HTTPRedirectHandler):
+              def redirect_request(self, *args, **kwargs):
+                  return None
+          request = urllib.request.Request(
+              origin + "/api/monitor/cron", method="POST",
+              headers={"Authorization": "Bearer " + token, "Accept": "application/json"},
+          )
+          try:
+              with urllib.request.build_opener(NoRedirect).open(request, timeout=120) as response:
+                  result = json.load(response)
+              if result.get("ok") is not True:
+                  sys.exit("El backend no confirmÃ³ la tanda. Revisa el estado del monitor.")
+              print(json.dumps({key: result.get(key) for key in
+                    ("state", "day", "jobsAttempted", "jobsSucceeded", "resumeAfter")}))
+          except urllib.error.HTTPError as error:
+              sys.exit("El backend devolviÃ³ HTTP " + str(error.code) + ". Revisa el token, la publicaciÃ³n y el estado de la cola.")
+          except (urllib.error.URLError, TimeoutError, ValueError):
+              sys.exit("No se recibiÃ³ una confirmaciÃ³n vÃ¡lida. La siguiente ejecuciÃ³n retomarÃ¡ la cola.")
+          PY
+
